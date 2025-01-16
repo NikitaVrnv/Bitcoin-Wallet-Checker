@@ -4,7 +4,7 @@ This Python script generates random Bitcoin wallet addresses (using BIP39 mnemon
 
 **Important: This tool is for educational purposes only. It is NOT a tool for finding active Bitcoin wallets with balances. The likelihood of finding a wallet with a positive balance through random generation is EXTREMELY low.**
 
-<img width="1001" alt="image" src="https://github.com/user-attachments/assets/bae40fac-3858-4b20-9095-73875deb85c4" />
+<img width="813" alt="image" src="https://github.com/user-attachments/assets/f44d3137-ca9f-4601-ad9d-2b65bbaa8c72" />
 
 ## Disclaimer
 
