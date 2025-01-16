@@ -1,22 +1,32 @@
 import secrets
 import hashlib
-import os
 from mnemonic import Mnemonic
-import ecdsa
 from bitcoin import privtopub, pubtoaddr
 import asyncio
 import aiohttp
-import json
 import time
 import signal
-import random
+import logging
+import sys
 
 # Global settings
-address_counter = 0
-continue_checking = True
-output_file = "found_wallets.txt"
+ADDRESS_COUNTER = 0
+CONTINUE_CHECKING = True
+OUTPUT_FILE = "found_wallets.txt"
 API_CALL_INTERVAL = 10
-MAX_CONCURRENT_REQUESTS = 10000  # Adjust for API rate limits
+MAX_CONCURRENT_REQUESTS = 1000  # Reduced for testing; adjust as needed
+API_BASE_URL = "https://blockstream.info/api"
+RETRY_COUNT = 3
+RETRY_DELAY = 1  # Initial retry delay in seconds
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+logger = logging.getLogger(__name__)
+
 
 # Semaphore for controlling concurrency
 semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
@@ -46,21 +56,11 @@ def get_bitcoin_address(private_key):
 
 
 async def fetch_balance(session, address):
-    """Fetches the balance of a Bitcoin address using multiple APIs."""
-    async with semaphore:
+    """Fetches the balance of a Bitcoin address using Blockstream API with retry logic."""
+    url = f"{API_BASE_URL}/address/{address}"
+    retry_delay = RETRY_DELAY
+    for attempt in range(RETRY_COUNT):
         try:
-            # Blockcypher API
-            url = f"https://api.blockcypher.com/v1/btc/main/addrs/{address}/balance"
-            async with session.get(url) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    return data.get("balance", 0)
-        except Exception:
-            pass
-
-        try:
-            # Blockstream API (fallback)
-            url = f"https://blockstream.info/api/address/{address}"
             async with session.get(url) as response:
                 if response.status == 200:
                     data = await response.json()
@@ -69,17 +69,43 @@ async def fetch_balance(session, address):
                         - data.get("chain_stats", {}).get("spent_txo_sum", 0)
                     )
                     return balance
-        except Exception:
-            return -1
+                elif response.status == 429:
+                     retry_after = int(response.headers.get("Retry-After", retry_delay))
+                     logger.warning(
+                        f"Rate limited for {address}, retrying in {retry_after} seconds (attempt {attempt + 1}/{RETRY_COUNT})"
+                    )
+                     await asyncio.sleep(retry_after)
+                     retry_delay *= 2
+                elif response.status >= 500:  # Server Error
+                    logger.warning(
+                        f"Server error {response.status} while getting balance for {address} (attempt {attempt + 1}/{RETRY_COUNT})"
+                    )
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 2
+                elif response.status == 404: # Address not found
+                    return 0 # Address has no balance.
+                else:
+                     logger.error(f"API error {response.status} for {address}, not retrying.")
+                     return None # API error
+        except aiohttp.ClientError as e:
+            logger.error(f"Client error while fetching {address}: {e}")
+            await asyncio.sleep(retry_delay)
+            retry_delay *= 2
+        except Exception as e:
+            logger.error(f"Exception while fetching {address}: {e}")
+            await asyncio.sleep(retry_delay)
+            retry_delay *= 2
 
-    return -1  # Indicate no balance found or error
+    logger.error(f"Max retries reached for {address}, giving up.")
+    return None # API error or maximum retries
 
 
 def save_wallet_to_file(mnemonic, private_key, address, balance):
     """Saves wallet details to a file."""
-    with open(output_file, "a") as f:
+    global ADDRESS_COUNTER
+    with open(OUTPUT_FILE, "a") as f:
         f.write("=" * 30 + "\n")
-        f.write(f"Wallet #{address_counter} found!\n")
+        f.write(f"Wallet #{ADDRESS_COUNTER} found!\n")
         f.write(f"Mnemonic: {mnemonic}\n")
         f.write(f"Private Key (Hex): {private_key.hex()}\n")
         f.write(f"Address: {address}\n")
@@ -89,40 +115,43 @@ def save_wallet_to_file(mnemonic, private_key, address, balance):
 
 def signal_handler(sig, frame):
     """Handles interrupt signals."""
-    global continue_checking
-    print("\nStopping the wallet checker...")
-    continue_checking = False
+    global CONTINUE_CHECKING
+    logger.info("Stopping the wallet checker...")
+    CONTINUE_CHECKING = False
 
 
 async def check_wallet(session):
     """Generates and checks a single wallet."""
-    global address_counter
+    global ADDRESS_COUNTER
 
     mnemonic = generate_bip39_seed()
     private_key = get_private_key_from_mnemonic(mnemonic)
     address = get_bitcoin_address(private_key)
 
-    address_counter += 1
+    ADDRESS_COUNTER += 1
 
-    if address_counter % API_CALL_INTERVAL == 0:
-        balance = await fetch_balance(session, address)
-        print(f"Checked Wallet #{address_counter}: {address} | Balance: {balance} satoshis")
-
-        if balance > 0:
-            print("Wallet with balance found! Saving details...")
-            save_wallet_to_file(mnemonic, private_key, address, balance)
+    if ADDRESS_COUNTER % API_CALL_INTERVAL == 0:
+        async with semaphore:  # Throttle the API calls
+            balance = await fetch_balance(session, address)
+            if balance is None:
+                logger.warning(f"Checked Wallet #{ADDRESS_COUNTER}: {address} | Balance: API error")
+            else:
+                logger.info(f"Checked Wallet #{ADDRESS_COUNTER}: {address} | Balance: {balance} satoshis")
+                if balance > 0:
+                   logger.info("Wallet with balance found! Saving details...")
+                   save_wallet_to_file(mnemonic, private_key, address, balance)
 
 
 async def main():
     """Main function to run the wallet checker."""
-    global address_counter
+    global ADDRESS_COUNTER, CONTINUE_CHECKING
 
     signal.signal(signal.SIGINT, signal_handler)
-    print("Press Ctrl+C to stop the script.")
+    logger.info("Press Ctrl+C to stop the script.")
 
     async with aiohttp.ClientSession() as session:
         tasks = []
-        while continue_checking:
+        while CONTINUE_CHECKING:
             if len(tasks) < MAX_CONCURRENT_REQUESTS:
                 tasks.append(asyncio.create_task(check_wallet(session)))
 
@@ -133,7 +162,7 @@ async def main():
         # Wait for all remaining tasks to complete
         await asyncio.gather(*tasks)
 
-    print("Wallet checker finished.")
+    logger.info("Wallet checker finished.")
 
 
 if __name__ == "__main__":
