@@ -13,8 +13,8 @@ import sys
 ADDRESS_COUNTER = 0
 CONTINUE_CHECKING = True
 OUTPUT_FILE = "found_wallets.txt"
-API_CALL_INTERVAL = 10
-MAX_CONCURRENT_REQUESTS = 1000  # Reduced for testing; adjust as needed
+API_CALL_INTERVAL = 3
+MAX_CONCURRENT_REQUESTS = 100000
 API_BASE_URL = "https://blockstream.info/api"
 RETRY_COUNT = 3
 RETRY_DELAY = 1  # Initial retry delay in seconds
@@ -136,7 +136,7 @@ async def check_wallet(session):
             if balance is None:
                 logger.warning(f"Checked Wallet #{ADDRESS_COUNTER}: {address} | Balance: API error")
             else:
-                logger.info(f"Checked Wallet #{ADDRESS_COUNTER}: {address} | Balance: {balance} satoshis")
+                logger.info(f"Checked Wallet #{ADDRESS_COUNTER}: {address} | Balance: {balance} satoshis | Seed: {mnemonic}")
                 if balance > 0:
                    logger.info("Wallet with balance found! Saving details...")
                    save_wallet_to_file(mnemonic, private_key, address, balance)
